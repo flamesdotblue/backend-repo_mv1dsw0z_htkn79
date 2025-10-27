@@ -1,6 +1,17 @@
 import os
-from fastapi import FastAPI
+import base64
+import random
+from datetime import datetime
+from typing import List
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel
+from bson import ObjectId
+
+from database import db, create_document, get_documents
+from schemas import Resume, Application, ApplyRequest
 
 app = FastAPI()
 
@@ -14,56 +25,136 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
-
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+    return {"message": "AutoApply Backend Running"}
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
+    status = {
         "backend": "✅ Running",
         "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
+        "database_url": "❌ Not Set",
+        "database_name": "❌ Not Set",
     }
-    
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            status["database"] = "✅ Connected"
+            status["database_url"] = "✅ Set"
+            status["database_name"] = db.name
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        status["database"] = f"❌ Error: {e}"
+    return status
 
+# -------- Resume Upload & Retrieval --------
+@app.post("/resume/upload")
+async def upload_resume(file: UploadFile = File(...)):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    if len(content) > 5 * 1024 * 1024:
+        # 5MB limit for demo
+        raise HTTPException(status_code=413, detail="File too large (max 5MB in demo)")
+
+    resume_doc = Resume(
+        original_name=file.filename,
+        content_type=file.content_type or "application/octet-stream",
+        size=len(content),
+        data_b64=base64.b64encode(content).decode("utf-8"),
+    )
+    resume_id = create_document("resume", resume_doc)
+    return {"id": resume_id, "original_name": resume_doc.original_name, "content_type": resume_doc.content_type, "size": resume_doc.size}
+
+@app.get("/resume")
+def list_resumes():
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    docs = get_documents("resume")
+    # Strip data_b64 for listing
+    out = []
+    for d in docs:
+        out.append({
+            "id": str(d.get("_id")),
+            "original_name": d.get("original_name"),
+            "content_type": d.get("content_type"),
+            "size": d.get("size"),
+            "created_at": d.get("created_at"),
+        })
+    return out
+
+@app.get("/resume/{resume_id}")
+def download_resume(resume_id: str):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    try:
+        doc = db["resume"].find_one({"_id": ObjectId(resume_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid resume id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    data = base64.b64decode(doc.get("data_b64") or b"")
+    return StreamingResponse(iter([data]), media_type=doc.get("content_type") or "application/octet-stream", headers={"Content-Disposition": f"attachment; filename={doc.get('original_name', 'resume')}"})
+
+# -------- Application Planning / Sending (simulated) --------
+@app.post("/apply/plan")
+def plan_applications(req: ApplyRequest):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    # Validate resume exists
+    try:
+        _ = db["resume"].find_one({"_id": ObjectId(req.resume_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid resume id")
+
+    planned: List[dict] = []
+    cap = max(1, min(req.daily_cap or 10, 50))
+    window_start = req.time_window_start or 9
+    window_end = req.time_window_end or 19
+    for i, board in enumerate(req.boards[:cap]):
+        hour = random.randint(window_start, max(window_start, window_end))
+        minute = random.randint(0, 59)
+        app_doc = Application(
+            board=board,
+            job_title=None,
+            company=None,
+            resume_id=req.resume_id,
+            match_score=80,
+            paraphrase_level=req.paraphrase_level or 50,
+            planned_time=f"{hour:02d}:{minute:02d}",
+            status="planned",
+        )
+        app_id = create_document("application", app_doc)
+        planned.append({"id": app_id, **app_doc.model_dump()})
+    return planned
+
+class SendRequest(BaseModel):
+    application_ids: List[str]
+
+@app.post("/apply/send")
+def send_applications(req: SendRequest):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    sent = []
+    for app_id in req.application_ids:
+        try:
+            doc = db["application"].find_one({"_id": ObjectId(app_id)})
+            if not doc:
+                continue
+            # For demo: insert a new record representing a sent application
+            record = {
+                "application_id": app_id,
+                "board": doc.get("board"),
+                "resume_id": doc.get("resume_id"),
+                "status": "sent",
+                "sent_at": datetime.utcnow(),
+            }
+            new_id = create_document("submission", record)
+            sent.append({"submission_id": new_id, **record})
+        except Exception:
+            continue
+    return sent
 
 if __name__ == "__main__":
     import uvicorn

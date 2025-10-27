@@ -2,47 +2,42 @@
 Database Schemas
 
 Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
-
 Each Pydantic model represents a collection in your database.
 Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+- User -> "user"
+- Resume -> "resume"
+- Application -> "application"
 """
-
+from typing import Optional, List
 from pydantic import BaseModel, Field
-from typing import Optional
 
-# Example schemas (replace with your own):
-
-class User(BaseModel):
+class Resume(BaseModel):
+    """Stored resumes uploaded by users
+    Collection: "resume"
     """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
-    """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+    original_name: str = Field(..., description="Original file name provided by the user")
+    content_type: str = Field(..., description="MIME type of the uploaded file")
+    size: int = Field(..., ge=1, description="File size in bytes")
+    data_b64: str = Field(..., description="Base64-encoded file bytes")
 
-class Product(BaseModel):
+class Application(BaseModel):
+    """Planned or sent job applications
+    Collection: "application"
     """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
+    board: str = Field(..., description="Target job board, e.g., LinkedIn, Naukri")
+    job_title: Optional[str] = Field(None, description="Job title if known")
+    company: Optional[str] = Field(None, description="Company name if known")
+    resume_id: str = Field(..., description="Reference to the resume document ID")
+    match_score: Optional[int] = Field(None, ge=0, le=100, description="Match score for this job")
+    paraphrase_level: Optional[int] = Field(50, ge=0, le=100, description="Degree of paraphrasing to humanize text")
+    planned_time: Optional[str] = Field(None, description="Local time planned for sending, e.g., 14:35")
+    status: str = Field('planned', description="Status: planned | sent | failed")
 
-# Add your own schemas here:
-# --------------------------------------------------
-
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class ApplyRequest(BaseModel):
+    boards: List[str] = Field(..., description="Boards to apply to")
+    resume_id: str = Field(..., description="Uploaded resume ID to attach")
+    min_score: Optional[int] = Field(0, ge=0, le=100)
+    paraphrase_level: Optional[int] = Field(50, ge=0, le=100)
+    daily_cap: Optional[int] = Field(10, ge=1, le=100)
+    time_window_start: Optional[int] = Field(9, ge=0, le=23)
+    time_window_end: Optional[int] = Field(19, ge=0, le=23)
