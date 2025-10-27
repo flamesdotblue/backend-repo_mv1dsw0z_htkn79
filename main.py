@@ -6,7 +6,7 @@ from typing import List
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from bson import ObjectId
 
@@ -54,10 +54,7 @@ async def upload_resume(file: UploadFile = File(...)):
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    if len(content) > 5 * 1024 * 1024:
-        # 5MB limit for demo
-        raise HTTPException(status_code=413, detail="File too large (max 5MB in demo)")
-
+    # No artificial size cap here; allow large payloads as infra permits
     resume_doc = Resume(
         original_name=file.filename,
         content_type=file.content_type or "application/octet-stream",
@@ -72,7 +69,6 @@ def list_resumes():
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
     docs = get_documents("resume")
-    # Strip data_b64 for listing
     out = []
     for d in docs:
         out.append({
@@ -109,7 +105,7 @@ def plan_applications(req: ApplyRequest):
         raise HTTPException(status_code=400, detail="Invalid resume id")
 
     planned: List[dict] = []
-    cap = max(1, min(req.daily_cap or 10, 50))
+    cap = max(1, min((req.daily_cap or 10), 100))
     window_start = req.time_window_start or 9
     window_end = req.time_window_end or 19
     for i, board in enumerate(req.boards[:cap]):
@@ -120,7 +116,7 @@ def plan_applications(req: ApplyRequest):
             job_title=None,
             company=None,
             resume_id=req.resume_id,
-            match_score=80,
+            match_score=max(0, min(req.min_score or 70, 100)),
             paraphrase_level=req.paraphrase_level or 50,
             planned_time=f"{hour:02d}:{minute:02d}",
             status="planned",
@@ -142,7 +138,6 @@ def send_applications(req: SendRequest):
             doc = db["application"].find_one({"_id": ObjectId(app_id)})
             if not doc:
                 continue
-            # For demo: insert a new record representing a sent application
             record = {
                 "application_id": app_id,
                 "board": doc.get("board"),
@@ -155,6 +150,20 @@ def send_applications(req: SendRequest):
         except Exception:
             continue
     return sent
+
+@app.get("/apply/sent")
+def list_sent():
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    docs = get_documents("submission")
+    return [{
+        "id": str(d.get("_id")),
+        "application_id": d.get("application_id"),
+        "board": d.get("board"),
+        "resume_id": d.get("resume_id"),
+        "status": d.get("status"),
+        "sent_at": d.get("sent_at"),
+    } for d in docs]
 
 if __name__ == "__main__":
     import uvicorn
